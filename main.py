@@ -4,6 +4,7 @@ import base64
 import time
 import os
 import logging
+from aiohttp import web
 from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -21,6 +22,20 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     logger.error("BOT_TOKEN environment variable is not set!")
     exit(1)
+
+# Health check server setup
+async def health_check(request):
+    return web.Response(text="Telegram Bot is Running")
+
+async def start_http_server():
+    """Start a minimal HTTP server for Render's port requirement"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logger.info("HTTP server started on port 8080")
 
 async def extract_link_from_page(page):
     try:
@@ -41,11 +56,11 @@ async def extract_link_from_page(page):
                             decoded = base64.b64decode(b64_link).decode()
                             return decoded
             except Exception as e:
-                logger.debug(f"Error checking frame: {e}")
+                logger.debug(f"Frame check error: {e}")
                 continue
         return None
     except Exception as e:
-        logger.error(f"Error in extract_link_from_page: {e}")
+        logger.error(f"Extraction error: {e}")
         return None
 
 async def resolve_ozolink_once(url):
@@ -67,27 +82,27 @@ async def resolve_ozolink_once(url):
             try:
                 await page.goto(url, timeout=15000, wait_until="domcontentloaded")
                 
+                # Wait for redirects
                 for _ in range(15):
                     await page.wait_for_timeout(1000)
                     if "ozolinks.art" not in page.url:
                         break
                 
-                final = await extract_link_from_page(page)
-                return final
+                return await extract_link_from_page(page)
             except Exception as e:
-                logger.error(f"Error during page operations: {e}")
+                logger.error(f"Page error: {e}")
                 return None
             finally:
                 await browser.close()
     except Exception as e:
-        logger.error(f"Error in resolve_ozolink_once: {e}")
+        logger.error(f"Browser error: {e}")
         return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text("Send me an Ozolink URL and I'll decode it.")
     except Exception as e:
-        logger.error(f"Error in start command: {e}")
+        logger.error(f"Start command error: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -109,20 +124,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except asyncio.TimeoutError:
         await update.message.reply_text("⚠️ The operation timed out. Please try again.")
     except Exception as e:
-        logger.error(f"Error handling message: {e}")
+        logger.error(f"Message handling error: {e}")
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
 async def main():
-    try:
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        logger.info("✅ Bot starting...")
-        await application.run_polling()
-    except Exception as e:
-        logger.error(f"Fatal error in main: {e}")
-        raise
+    # Start HTTP server in background
+    asyncio.create_task(start_http_server())
+    
+    # Start Telegram bot
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    logger.info("✅ Bot starting...")
+    await application.run_polling()
 
 if __name__ == "__main__":
     nest_asyncio.apply()
