@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 import base64
@@ -7,7 +8,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import nest_asyncio # 👈 Import the library
 
-BOT_TOKEN = ""
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 async def extract_link_from_page(page):
     await page.wait_for_timeout(2000)
