@@ -18,6 +18,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+# THIS IS THE NEW LINE TO HIDE THE NOISY HTTP POLLING LOGS
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
@@ -271,7 +274,6 @@ async def movie_selection_handler(update: Update, context: ContextTypes.DEFAULT_
                                   parse_mode=ParseMode.MARKDOWN)
     if search_key in RESULTS_CACHE:
         del RESULTS_CACHE[search_key]
-
 
 async def quality_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
