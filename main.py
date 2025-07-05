@@ -162,14 +162,14 @@ async def extract_final_link(url: str):
             if browser and browser.is_connected():
                 await browser.close()
         if attempt < max_attempts - 1:
-            logger.warning(f"Attempt {attempt + 1} failed. Retrying in 3 seconds...")
-            await asyncio.sleep(3)
+            logger.warning(f"Attempt {attempt + 1} failed. Retrying in 1 seconds...")
+            await asyncio.sleep(1)
     logger.error("All retry attempts failed to extract the link.")
     return None
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a welcome message."""
-    await update.message.reply_text("Send me a movie/series name or a direct link to process.")
+    await update.message.reply_text("Send me a movie/series name.")
 
 async def set_domain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Updates the domain used for searching."""
