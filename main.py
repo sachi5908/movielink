@@ -313,15 +313,10 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # --- MAIN EXECUTION ---
 async def main():
     """Configures and runs the bot and web server."""
-
-    # 1. Set up the web server runner
     http_runner = setup_http_server()
     await http_runner.setup()
     site = web.TCPSite(http_runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"HTTP health check server started on port {PORT}")
-
-    # 2. Set up the Telegram bot
+    
     application = Application.builder().token(BOT_TOKEN).build()
     
     direct_link_regex = re.compile(r'https?://[a-zA-Z0-9.-]+\/\?id=[\w/+=.-]+')
@@ -334,14 +329,27 @@ async def main():
     application.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
     application.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
 
-    # 3. Run the bot and web server together, with graceful shutdown
     try:
-        logger.info("Bot is starting to poll...")
+        logger.info("Initializing application...")
+        await application.initialize()
+
+        # THIS IS THE NEW DIAGNOSTIC STEP
+        bot_info = await application.bot.get_me()
+        logger.info(f"Successfully connected as bot: {bot_info.username}")
+
+        await site.start()
+        logger.info(f"HTTP health check server started on port {PORT}")
+        
+        logger.info("Bot is starting to poll for updates...")
         await application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot shutdown initiated by user.")
+        logger.warning("run_polling has exited. This should not happen during normal operation.")
+
+    except Exception as e:
+        logger.error(f"An error occurred during application startup or polling: {e}", exc_info=True)
     finally:
-        logger.info("Cleaning up HTTP server...")
+        logger.info("Executing finally block for graceful shutdown...")
+        if application.running:
+            await application.shutdown()
         await http_runner.cleanup()
         logger.info("Application finished.")
 
