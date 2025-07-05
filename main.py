@@ -10,6 +10,15 @@ from playwright.async_api import async_playwright
 import asyncio
 import re
 import os
+import logging
+from aiohttp import web
+
+# --- LOGGING SETUP ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
 # Fetch the bot token from environment variables for security
@@ -17,6 +26,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("No BOT_TOKEN found in environment variables")
 
+PORT = int(os.environ.get("PORT", 8080)) # For Render's web service port
 DOMAIN_FILE = "domain.txt"
 DEFAULT_DOMAIN = "https://ndjsbda.com"
 
@@ -54,7 +64,7 @@ def search_bollyflix(movie_title: str):
             return None
         return [{'title': a.find('h2', class_='title').a.get_text(strip=True), 'link': a.find('h2', class_='title').a['href']} for a in articles]
     except requests.exceptions.RequestException as e:
-        print(f"Domain connection error: {e}")
+        logger.error(f"Domain connection error: {e}")
         return "domain_error"
 
 def get_download_links(page_url: str):
@@ -93,7 +103,7 @@ def get_download_links(page_url: str):
         return final_links if final_links else None
 
     except requests.exceptions.RequestException as e:
-        print(f"Web scraping error on page: {e}")
+        logger.error(f"Web scraping error on page: {e}")
         return "error"
 
 # --- LINK EXTRACTION ---
@@ -115,18 +125,18 @@ async def parse_page_for_link(page):
                         if b64_link:
                             return base64.b64decode(b64_link).decode()
             except Exception as e:
-                print(f"Frame check error (continuing): {e}")
+                logger.warning(f"Frame check error (continuing): {e}")
                 continue
         return None
     except Exception as e:
-        print(f"Error during page parsing: {e}")
+        logger.error(f"Error during page parsing: {e}")
         return None
 
 async def extract_final_link(url: str):
     """Manages the browser lifecycle to resolve the final link, with retries."""
     max_attempts = 4
     for attempt in range(max_attempts):
-        print(f"--- Link extraction attempt {attempt + 1} of {max_attempts} ---")
+        logger.info(f"--- Link extraction attempt {attempt + 1} of {max_attempts} ---")
         browser = None
         try:
             async with async_playwright() as p:
@@ -141,16 +151,16 @@ async def extract_final_link(url: str):
                         await browser.close()
                         return found_link
                 except Exception as e:
-                    print(f"Page navigation error on attempt {attempt + 1}: {e}")
+                    logger.error(f"Page navigation error on attempt {attempt + 1}: {e}")
         except Exception as e:
-            print(f"A critical browser error occurred on attempt {attempt + 1}: {e}")
+            logger.critical(f"A critical browser error occurred on attempt {attempt + 1}: {e}")
         finally:
             if browser and browser.is_connected():
                 await browser.close()
         if attempt < max_attempts - 1:
-            print(f"Attempt {attempt + 1} failed. Retrying in 3 seconds...")
+            logger.warning(f"Attempt {attempt + 1} failed. Retrying in 3 seconds...")
             await asyncio.sleep(3)
-    print("All retry attempts failed to extract the link.")
+    logger.error("All retry attempts failed to extract the link.")
     return None
 
 # --- TELEGRAM BOT HANDLERS ---
@@ -313,11 +323,33 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if links_key in RESULTS_CACHE:
         del RESULTS_CACHE[links_key]
 
+# --- HEALTH CHECK SERVER ---
+
+async def health_check(request):
+    """A simple health check endpoint."""
+    logger.info("Health check endpoint was pinged.")
+    return web.Response(text="Telegram Bot is Running")
+
+async def start_http_server():
+    """Starts the minimal HTTP server for Render's health checks."""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"HTTP server started on port {PORT}")
+    # Keep the server running
+    await asyncio.Event().wait()
+
+
 # --- MAIN EXECUTION ---
 
-def main():
-    """Starts the bot and adds all handlers."""
-    print(f"Bot is starting with domain: {get_domain()}")
+async def main():
+    """Starts the bot, http server and adds all handlers."""
+    logger.info(f"Bot is starting with domain: {get_domain()}")
+    
+    # Configure the Telegram bot application
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Regex to detect direct links with an '?id=' parameter
@@ -327,19 +359,35 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("setdomain", set_domain_command))
 
-    # Add the specific handler for direct links, which takes priority over the general text search
+    # Add the specific handler for direct links
     app.add_handler(MessageHandler(filters.Regex(direct_link_regex), handle_direct_link))
 
-    # Add the general search handler for any other text that is not a command or a direct link
+    # Add the general search handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
 
-    # Add callback query handlers for the button-based workflow
+    # Add callback query handlers
     app.add_handler(CallbackQueryHandler(movie_selection_handler, pattern="^movie:.*"))
     app.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
     app.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
+    
+    # Run the bot and the HTTP server concurrently
+    async with app:
+        logger.info("Starting bot polling...")
+        await app.start()
+        await app.updater.start_polling()
+        
+        # Start the HTTP server
+        http_server_task = asyncio.create_task(start_http_server())
 
-    print("Bot is now polling for messages.")
-    app.run_polling()
+        # Wait for both to complete
+        await asyncio.gather(http_server_task, app.updater.task)
+        
+        # This part is for graceful shutdown
+        await app.updater.stop()
+        await app.stop()
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped manually.")
