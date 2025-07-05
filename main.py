@@ -327,64 +327,49 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def health_check(request):
     """A simple health check endpoint."""
-    logger.info("Health check endpoint was pinged.")
     return web.Response(text="Telegram Bot is Running")
 
-async def start_http_server():
-    """Starts the minimal HTTP server for Render's health checks."""
+def setup_http_server():
+    """Sets up the aiohttp application and returns the runner."""
     app = web.Application()
     app.router.add_get('/', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    logger.info(f"HTTP server started on port {PORT}")
-    # Keep the server running
-    await asyncio.Event().wait()
-
+    return web.AppRunner(app)
 
 # --- MAIN EXECUTION ---
 
 async def main():
-    """Starts the bot, http server and adds all handlers."""
+    """Starts the bot and the HTTP server, and handles graceful shutdown."""
     logger.info(f"Bot is starting with domain: {get_domain()}")
     
-    # Configure the Telegram bot application
+    # --- BOT SETUP ---
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Regex to detect direct links with an '?id=' parameter
     direct_link_regex = re.compile(r'https?://[a-zA-Z0-9.-]+\/\?id=[\w/+=.-]+')
 
-    # Add command handlers first
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("setdomain", set_domain_command))
-
-    # Add the specific handler for direct links
     app.add_handler(MessageHandler(filters.Regex(direct_link_regex), handle_direct_link))
-
-    # Add the general search handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
-
-    # Add callback query handlers
     app.add_handler(CallbackQueryHandler(movie_selection_handler, pattern="^movie:.*"))
     app.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
     app.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
     
-    # Run the bot and the HTTP server concurrently
-    async with app:
-        logger.info("Starting bot polling...")
-        await app.start()
-        await app.updater.start_polling()
-        
-        # Start the HTTP server
-        http_server_task = asyncio.create_task(start_http_server())
+    # --- HTTP SERVER SETUP ---
+    http_runner = setup_http_server()
+    await http_runner.setup()
+    site = web.TCPSite(http_runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"HTTP server started on port {PORT}")
 
-        # Wait for both to complete
-        await asyncio.gather(http_server_task, app.updater.task)
-        
-        # This part is for graceful shutdown
-        await app.updater.stop()
-        await app.stop()
+    # --- RUN BOT AND SERVER ---
+    try:
+        # run_polling is a blocking call that will run until the bot is stopped.
+        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        # When the bot is stopped (e.g., by Ctrl+C), clean up the HTTP server.
+        await http_runner.cleanup()
+        logger.info("HTTP server cleaned up.")
+
 
 if __name__ == "__main__":
     try:
