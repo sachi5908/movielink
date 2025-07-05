@@ -2,5 +2,4 @@ requests
 beautifulsoup4
 python-telegram-bot
 playwright
-asyncio
 aiohttp
