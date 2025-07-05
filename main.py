@@ -312,11 +312,9 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # --- MAIN EXECUTION ---
 async def main():
-    """Configures and runs the bot and web server."""
-    http_runner = setup_http_server()
-    await http_runner.setup()
-    site = web.TCPSite(http_runner, "0.0.0.0", PORT)
+    """Configures and runs the bot and web server concurrently."""
     
+    # Set up the Telegram application
     application = Application.builder().token(BOT_TOKEN).build()
     
     direct_link_regex = re.compile(r'https?://[a-zA-Z0-9.-]+\/\?id=[\w/+=.-]+')
@@ -328,33 +326,29 @@ async def main():
     application.add_handler(CallbackQueryHandler(movie_selection_handler, pattern="^movie:.*"))
     application.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
     application.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
+    
+    # Set up the aiohttp web server
+    http_runner = setup_http_server()
+    await http_runner.setup()
+    site = web.TCPSite(http_runner, "0.0.0.0", PORT)
 
-    try:
-        logger.info("Initializing application...")
-        await application.initialize()
-
-        # THIS IS THE NEW DIAGNOSTIC STEP
+    # Run application and web server together
+    async with application:
         bot_info = await application.bot.get_me()
         logger.info(f"Successfully connected as bot: {bot_info.username}")
-
+        
+        await application.start()
+        await application.updater.start_polling()
+        logger.info("Bot has started polling for updates.")
+        
         await site.start()
         logger.info(f"HTTP health check server started on port {PORT}")
         
-        logger.info("Bot is starting to poll for updates...")
-        await application.run_polling(allowed_updates=Update.ALL_TYPES)
-        logger.warning("run_polling has exited. This should not happen during normal operation.")
-
-    except Exception as e:
-        logger.error(f"An error occurred during application startup or polling: {e}", exc_info=True)
-    finally:
-        logger.info("Executing finally block for graceful shutdown...")
-        if application.running:
-            await application.shutdown()
-        await http_runner.cleanup()
-        logger.info("Application finished.")
+        # Keep the script running until interrupted
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except Exception as e:
-        logger.error(f"Fatal error in top-level execution: {e}")
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped manually.")
