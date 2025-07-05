@@ -1,6 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 import json
@@ -18,11 +18,11 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-# This line hides the noisy httpx polling logs, as you requested
+# This line hides the noisy httpx polling logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --- SETUP 2: CONFIGURATION (Loads secret token from Render's environment) ---
+# --- SETUP 2: CONFIGURATION (Loads secret token from environment) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     logger.error("FATAL: BOT_TOKEN environment variable is not set!")
@@ -32,10 +32,10 @@ PORT = int(os.environ.get("PORT", 8080))
 DOMAIN_FILE = "domain.txt"
 DEFAULT_DOMAIN = "https://ndjsbda.com"
 
-# --- CACHE (Your original code, unchanged) ---
+# --- CACHE ---
 RESULTS_CACHE = {}
 
-# --- SETUP 3: HEALTH CHECK SERVER (Required by Render) ---
+# --- SETUP 3: HEALTH CHECK SERVER (For deployment platforms) ---
 async def health_check(request):
     """A simple health check endpoint."""
     return web.Response(text="Telegram Bot is Running")
@@ -46,9 +46,7 @@ def setup_http_server():
     app.router.add_get('/', health_check)
     return web.AppRunner(app)
 
-
-# --- YOUR ORIGINAL FUNCTIONS (Only print() was replaced with logger) ---
-
+# --- UTILITY FUNCTIONS ---
 def get_domain():
     """Reads the domain from the domain file, or returns the default."""
     if os.path.exists(DOMAIN_FILE):
@@ -63,6 +61,7 @@ def save_domain(new_domain: str):
     with open(DOMAIN_FILE, "w") as f:
         f.write(new_domain)
 
+# --- SCRAPING FUNCTIONS ---
 def search_bollyflix(movie_title: str):
     """Searches for content on the currently configured domain."""
     domain = get_domain()
@@ -79,12 +78,26 @@ def search_bollyflix(movie_title: str):
         logger.error(f"Domain connection error: {e}")
         return "domain_error"
 
-def get_download_links(page_url: str):
-    """Scrapes download links from a movie or series page."""
+def get_page_details(page_url: str):
+    """Scrapes poster, screenshots, and download links from a movie/series page."""
     try:
         response = requests.get(page_url, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
+
+        poster_tag = soup.find('meta', property='og:image')
+        poster_url = poster_tag['content'] if poster_tag else None
+
+        screenshot_urls = []
+        screenshots_heading = soup.find(lambda tag: tag.name in ['h2', 'h3'] and 'ScreenShots' in tag.get_text())
+        if screenshots_heading:
+            p_tag = screenshots_heading.find_next_sibling('p')
+            if p_tag:
+                img_tags = p_tag.find_all('img')
+                for img in img_tags:
+                    if img.has_attr('src'):
+                        screenshot_urls.append(img['src'])
+
         final_links = []
         movie_headings = soup.find_all('h5', style="text-align: center;")
         for heading in movie_headings:
@@ -96,20 +109,26 @@ def get_download_links(page_url: str):
                     links_data = [{'text': link.get_text(strip=True), 'url': link['href']} for link in download_links]
                     if links_data:
                         final_links.append({'quality': quality_title, 'links': links_data})
-        if final_links:
-            return final_links
-        series_headings = soup.find_all('h4', style="text-align: center;")
-        for heading in series_headings:
-            quality_title = heading.get_text(strip=True)
-            links_p = heading.find_next_sibling('p')
-            if links_p:
-                download_button = links_p.find('a', class_=re.compile(r'(maxbutton|btnn)'))
-                if download_button and download_button.has_attr('href'):
-                    links_data = [{'text': 'Download Links', 'url': download_button['href']}]
-                    final_links.append({'quality': quality_title, 'links': links_data})
-        return final_links if final_links else None
+        if not final_links:
+            series_headings = soup.find_all('h4', style="text-align: center;")
+            for heading in series_headings:
+                quality_title = heading.get_text(strip=True)
+                links_p = heading.find_next_sibling('p')
+                if links_p:
+                    download_button = links_p.find('a', class_=re.compile(r'(maxbutton|btnn)'))
+                    if download_button and download_button.has_attr('href'):
+                        links_data = [{'text': 'Download Links', 'url': download_button['href']}]
+                        final_links.append({'quality': quality_title, 'links': links_data})
+        return {
+            'poster': poster_url,
+            'screenshots': screenshot_urls,
+            'download_links': final_links if final_links else None
+        }
     except requests.exceptions.RequestException as e:
         logger.error(f"Web scraping error on page: {e}")
+        return "error"
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in get_page_details: {e}")
         return "error"
 
 async def parse_page_for_link(page):
@@ -167,6 +186,7 @@ async def extract_final_link(url: str):
     logger.error("All retry attempts failed to extract the link.")
     return None
 
+# --- TELEGRAM HANDLERS ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a welcome message."""
     await update.message.reply_text("Send me a movie/series name.")
@@ -201,9 +221,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if search_results == "domain_error":
         domain = get_domain()
         await msg.edit_text(
-            f"⚠️ The current domain `{domain}` seems to be down.\n\n"
-            "Please set a new domain with the command:\n"
-            "`/setdomain https://new-domain.com`",
+            f"⚠️ The current domain `{domain}` seems to be down.\n\nPlease set a new domain with the command:\n`/setdomain https://new-domain.com`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -222,62 +240,115 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def movie_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     _p, search_key, index_str = query.data.split(':', 2)
     index = int(index_str)
     search_results = RESULTS_CACHE.get(search_key)
     if not search_results or index >= len(search_results):
         await query.edit_message_text("Error: Your search result has expired. Please search again.")
         return
+
     selected_item = search_results[index]
     page_url = selected_item['link']
     item_title_display = selected_item['title']
-    await query.edit_message_text(text=f"Fetching qualities for '{item_title_display}'...")
-    download_links_data = get_download_links(page_url)
-    if not download_links_data or download_links_data == "error":
-        await query.edit_message_text(f"Sorry, couldn't find any download links for '{item_title_display}'.")
+
+    await query.edit_message_text(text=f"Fetching details for '{item_title_display}'...")
+    page_details = get_page_details(page_url)
+
+    if not page_details or page_details == "error":
+        await query.edit_message_text(f"Sorry, couldn't find any details for '{item_title_display}'.")
         return
+
+    download_links_data = page_details.get('download_links')
+    poster_url = page_details.get('poster')
+    screenshot_urls = page_details.get('screenshots')
+
+    await query.delete_message()
+
+    message_ids_to_delete = []
+    if poster_url:
+        try:
+            await context.bot.send_photo(chat_id=query.message.chat_id, photo=poster_url)
+        except Exception as e:
+            logger.warning(f"Could not send poster image {poster_url}: {e}")
+
+    if screenshot_urls:
+        media_group = [InputMediaPhoto(media=url) for url in screenshot_urls[:10]]
+        if media_group:
+            try:
+                sent_media_msgs = await context.bot.send_media_group(chat_id=query.message.chat_id, media=media_group)
+                message_ids_to_delete.extend([msg.message_id for msg in sent_media_msgs])
+            except Exception as e:
+                logger.warning(f"Could not send media group: {e}")
+
+    if not download_links_data:
+        await context.bot.send_message(chat_id=query.message.chat_id, text=f"Sorry, couldn't find any download links for '{item_title_display}'.")
+        return
+
     links_key = f"links_{query.id}"
-    RESULTS_CACHE[links_key] = download_links_data
+    RESULTS_CACHE[links_key] = {
+        'links': download_links_data,
+        'message_ids': message_ids_to_delete
+    }
+
     keyboard = []
     for i, quality_group in enumerate(download_links_data):
         full_title = quality_group['quality']
+        
+        # --- Start of Bug Fix ---
         season_match = re.search(r'(Season\s*\d+)', full_title, re.IGNORECASE)
         season_text = season_match.group(1).strip() if season_match else ""
-        quality_match = re.search(r'(\d+p\s*\[.*?\])', full_title)
+        
+        # New, more robust regex to find the quality string from resolution (e.g., 720p) onwards
+        quality_match = re.search(r'(\d{3,4}p.*)', full_title, re.IGNORECASE)
         quality_text = quality_match.group(1).strip() if quality_match else ""
+        
+        # Logic to construct the final button text
         if season_text and quality_text:
             button_text = f"{season_text} - {quality_text}"
         elif quality_text:
             button_text = quality_text
-        else:
+        else: # Fallback to the full title if parsing fails
             button_text = full_title
+        # --- End of Bug Fix ---
+            
         callback_data = f"quality:{links_key}:{i}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(f"✅ *Select a quality for {item_title_display}*",
-                                  reply_markup=reply_markup,
-                                  parse_mode=ParseMode.MARKDOWN)
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=f"✅ *Select a quality for {item_title_display}*",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
     if search_key in RESULTS_CACHE:
         del RESULTS_CACHE[search_key]
+
 
 async def quality_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     _p, links_key, quality_index_str = query.data.split(':', 2)
     quality_index = int(quality_index_str)
-    all_links_data = RESULTS_CACHE.get(links_key)
-    if not all_links_data or quality_index >= len(all_links_data):
+    
+    cached_data = RESULTS_CACHE.get(links_key)
+    if not cached_data:
         await query.edit_message_text("Error: These links have expired. Please start a new search.")
         return
+
+    all_links_data = cached_data.get('links', [])
+    if quality_index >= len(all_links_data):
+        await query.edit_message_text("Error: Invalid link selection. Please start a new search.")
+        return
+    
     selected_quality_group = all_links_data[quality_index]
     keyboard = []
     for i, link_info in enumerate(selected_quality_group['links']):
         callback_data = f"process:{links_key}:{quality_index}:{i}"
         keyboard.append([InlineKeyboardButton(link_info['text'], callback_data=callback_data)])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(f"✅ *Select a download source for {selected_quality_group['quality']}*",
-                                  reply_markup=reply_markup,
-                                  parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(f"✅ *Select a download source for {selected_quality_group['quality']}*", reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
 async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -285,32 +356,46 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     _p, links_key, quality_index_str, link_index_str = query.data.split(':', 3)
     quality_index = int(quality_index_str)
     link_index = int(link_index_str)
-    all_links_data = RESULTS_CACHE.get(links_key)
-    if not all_links_data or quality_index >= len(all_links_data) or link_index >= len(all_links_data[quality_index]['links']):
+
+    cached_data = RESULTS_CACHE.get(links_key)
+    if not cached_data:
         await query.edit_message_text("Error: This link has expired. Please search again.")
         return
+
+    all_links_data = cached_data.get('links', [])
+    if quality_index >= len(all_links_data) or link_index >= len(all_links_data[quality_index]['links']):
+        await query.edit_message_text("Error: This link has expired. Please search again.")
+        return
+
     selected_link = all_links_data[quality_index]['links'][link_index]
     link_url = selected_link['url']
     link_text = selected_link['text']
+    
     await query.edit_message_text(f"Processing '{link_text}'... This may take a moment. ⏳")
     final_url = await extract_final_link(link_url)
+
+    message_ids_to_delete = cached_data.get('message_ids', [])
+    for msg_id in message_ids_to_delete:
+        try:
+            await context.bot.delete_message(chat_id=query.message.chat_id, message_id=msg_id)
+        except Exception as e:
+            logger.warning(f"Could not delete message {msg_id}: {e}")
+
     if final_url:
         keyboard = [[InlineKeyboardButton("✅ Open Download Link in Browser", url=final_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("Your direct download link is ready!", reply_markup=reply_markup)
     else:
         await query.edit_message_text("❌ Sorry, I could not extract the final download link. The link might be broken or changed.")
+
     if links_key in RESULTS_CACHE:
         del RESULTS_CACHE[links_key]
 
-# --- MAIN EXECUTION (This part is changed to work on a server) ---
+# --- MAIN EXECUTION ---
 async def main():
     """Configures and runs the bot and web server concurrently."""
-    
-    # Set up the Telegram application
     application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Your original handlers, unchanged
+
     direct_link_regex = re.compile(r'https?://[a-zA-Z0-9.-]+\/\?id=[\w/+=.-]+')
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setdomain", set_domain_command))
@@ -319,25 +404,19 @@ async def main():
     application.add_handler(CallbackQueryHandler(movie_selection_handler, pattern="^movie:.*"))
     application.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
     application.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
-    
-    # Set up the aiohttp web server
+
     http_runner = setup_http_server()
     await http_runner.setup()
     site = web.TCPSite(http_runner, "0.0.0.0", PORT)
 
-    # Run application and web server together using the correct concurrent pattern
     async with application:
         bot_info = await application.bot.get_me()
         logger.info(f"Successfully connected as bot: {bot_info.username}")
-        
         await application.start()
         await application.updater.start_polling()
         logger.info("Bot has started polling for updates.")
-        
         await site.start()
         logger.info(f"HTTP health check server started on port {PORT}")
-        
-        # Keep the script running until interrupted
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
