@@ -1,4 +1,10 @@
 #!/bin/bash
-python -m playwright install
-python -m playwright install-deps
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install Playwright browsers
+playwright install
+
+# Run the bot
 python main.py
