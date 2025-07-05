@@ -21,20 +21,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-# Fetch the bot token from environment variables for security
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("No BOT_TOKEN found in environment variables")
+    logger.error("FATAL: BOT_TOKEN environment variable is not set!")
+    exit(1)
 
-PORT = int(os.environ.get("PORT", 8080)) # For Render's web service port
+PORT = int(os.environ.get("PORT", 8080))
 DOMAIN_FILE = "domain.txt"
 DEFAULT_DOMAIN = "https://ndjsbda.com"
 
 # --- CACHE ---
 RESULTS_CACHE = {}
 
-# --- DOMAIN MANAGEMENT ---
+# --- HEALTH CHECK SERVER ---
+async def health_check(request):
+    """A simple health check endpoint."""
+    return web.Response(text="Telegram Bot is Running")
 
+def setup_http_server():
+    """Sets up the aiohttp application and returns the runner for lifecycle management."""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    return web.AppRunner(app)
+
+
+# --- DOMAIN MANAGEMENT ---
 def get_domain():
     """Reads the domain from the domain file, or returns the default."""
     if os.path.exists(DOMAIN_FILE):
@@ -50,7 +61,6 @@ def save_domain(new_domain: str):
         f.write(new_domain)
 
 # --- WEB SCRAPING ---
-
 def search_bollyflix(movie_title: str):
     """Searches for content on the currently configured domain."""
     domain = get_domain()
@@ -68,14 +78,13 @@ def search_bollyflix(movie_title: str):
         return "domain_error"
 
 def get_download_links(page_url: str):
-    """Scrapes download links from a movie or series page, handling different layouts."""
+    """Scrapes download links from a movie or series page."""
     try:
         response = requests.get(page_url, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         final_links = []
 
-        # Case 1: Handle Movie Pages (h5 tags)
         movie_headings = soup.find_all('h5', style="text-align: center;")
         for heading in movie_headings:
             if heading.find('span', style="color: #13BF3C;"):
@@ -89,7 +98,6 @@ def get_download_links(page_url: str):
         if final_links:
             return final_links
 
-        # Case 2: Handle Series Pages (h4 tags)
         series_headings = soup.find_all('h4', style="text-align: center;")
         for heading in series_headings:
             quality_title = heading.get_text(strip=True)
@@ -107,7 +115,6 @@ def get_download_links(page_url: str):
         return "error"
 
 # --- LINK EXTRACTION ---
-
 async def parse_page_for_link(page):
     """Scans the given Playwright page object for the Base64-encoded link."""
     try:
@@ -133,44 +140,39 @@ async def parse_page_for_link(page):
         return None
 
 async def extract_final_link(url: str):
-    """Manages the browser lifecycle to resolve the final link, with retries."""
-    max_attempts = 4
-    for attempt in range(max_attempts):
-        logger.info(f"--- Link extraction attempt {attempt + 1} of {max_attempts} ---")
-        browser = None
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
-                context = await browser.new_context()
-                page = await context.new_page()
-                try:
-                    await page.goto(url, timeout=15000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(10000)
-                    found_link = await parse_page_for_link(page)
-                    if found_link:
-                        await browser.close()
-                        return found_link
-                except Exception as e:
-                    logger.error(f"Page navigation error on attempt {attempt + 1}: {e}")
-        except Exception as e:
-            logger.critical(f"A critical browser error occurred on attempt {attempt + 1}: {e}")
-        finally:
-            if browser and browser.is_connected():
+    """Manages the browser lifecycle to resolve the final link."""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-gpu',
+                    '--disable-dev-shm-usage',
+                    '--disable-setuid-sandbox',
+                    '--no-sandbox'
+                ]
+            )
+            context = await browser.new_context()
+            page = await context.new_page()
+            try:
+                await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(5000)
+                found_link = await parse_page_for_link(page)
+                return found_link
+            except Exception as e:
+                logger.error(f"Page navigation error: {e}")
+                return None
+            finally:
                 await browser.close()
-        if attempt < max_attempts - 1:
-            logger.warning(f"Attempt {attempt + 1} failed. Retrying in 3 seconds...")
-            await asyncio.sleep(3)
-    logger.error("All retry attempts failed to extract the link.")
-    return None
+    except Exception as e:
+        logger.critical(f"A critical browser error occurred: {e}")
+        return None
 
 # --- TELEGRAM BOT HANDLERS ---
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message."""
     await update.message.reply_text("Send me a movie/series name or a direct link to process.")
 
 async def set_domain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Updates the domain used for searching."""
     try:
         new_domain = context.args[0]
         if not (new_domain.startswith("http://") or new_domain.startswith("https://")):
@@ -182,28 +184,26 @@ async def set_domain_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Usage: `/setdomain https://new-domain.com`")
 
 async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles direct ozolinks-style URLs sent by the user."""
     url = update.message.text
-    await update.message.reply_text("Processing your direct link... This may take a moment. ⏳")
+    msg = await update.message.reply_text("Processing your direct link... This may take a moment. ⏳")
     
     final_url = await extract_final_link(url)
 
     if final_url:
         keyboard = [[InlineKeyboardButton("✅ Open Download Link in Browser", url=final_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Your direct download link is ready!", reply_markup=reply_markup)
+        await msg.edit_text("Your direct download link is ready!", reply_markup=reply_markup)
     else:
-        await update.message.reply_text("❌ Sorry, I could not extract the final download link from the provided URL.")
+        await msg.edit_text("❌ Sorry, I could not extract the final download link from the provided URL.")
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the initial content search."""
     title = update.message.text
-    await update.message.reply_text(f"Searching for '{title}'...")
+    msg = await update.message.reply_text(f"Searching for '{title}'...")
     search_results = search_bollyflix(title)
 
     if search_results == "domain_error":
         domain = get_domain()
-        await update.message.reply_text(
+        await msg.edit_text(
             f"⚠️ The current domain `{domain}` seems to be down.\n\n"
             "Please set a new domain with the command:\n"
             "`/setdomain https://new-domain.com`",
@@ -212,7 +212,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not search_results:
-        await update.message.reply_text(f"Sorry, no results found for '{title}'.")
+        await msg.edit_text(f"Sorry, no results found for '{title}'.")
         return
 
     search_key = f"search_{update.effective_chat.id}-{update.message.message_id}"
@@ -222,10 +222,9 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         callback_data = f"movie:{search_key}:{i}"
         keyboard.append([InlineKeyboardButton(result['title'], callback_data=callback_data)])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Please select an item:', reply_markup=reply_markup)
+    await msg.edit_text('Please select an item:', reply_markup=reply_markup)
 
 async def movie_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles content selection and displays available quality buttons."""
     query = update.callback_query
     await query.answer()
     _p, search_key, index_str = query.data.split(':', 2)
@@ -251,17 +250,7 @@ async def movie_selection_handler(update: Update, context: ContextTypes.DEFAULT_
     RESULTS_CACHE[links_key] = download_links_data
     keyboard = []
     for i, quality_group in enumerate(download_links_data):
-        full_title = quality_group['quality']
-        season_match = re.search(r'(Season\s*\d+)', full_title, re.IGNORECASE)
-        season_text = season_match.group(1).strip() if season_match else ""
-        quality_match = re.search(r'(\d+p\s*\[.*?\])', full_title)
-        quality_text = quality_match.group(1).strip() if quality_match else ""
-        if season_text and quality_text:
-            button_text = f"{season_text} - {quality_text}"
-        elif quality_text:
-            button_text = quality_text
-        else:
-            button_text = full_title
+        button_text = quality_group['quality']
         callback_data = f"quality:{links_key}:{i}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
     
@@ -273,7 +262,6 @@ async def movie_selection_handler(update: Update, context: ContextTypes.DEFAULT_
         del RESULTS_CACHE[search_key]
 
 async def quality_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles quality selection and displays specific download link buttons."""
     query = update.callback_query
     await query.answer()
     _p, links_key, quality_index_str = query.data.split(':', 2)
@@ -295,7 +283,6 @@ async def quality_selection_handler(update: Update, context: ContextTypes.DEFAUL
                                   parse_mode=ParseMode.MARKDOWN)
 
 async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the final link selection, extracts the direct URL, and provides the 'Open in Browser' button."""
     query = update.callback_query
     await query.answer()
     _p, links_key, quality_index_str, link_index_str = query.data.split(':', 3)
@@ -323,56 +310,43 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if links_key in RESULTS_CACHE:
         del RESULTS_CACHE[links_key]
 
-# --- HEALTH CHECK SERVER ---
-
-async def health_check(request):
-    """A simple health check endpoint."""
-    return web.Response(text="Telegram Bot is Running")
-
-def setup_http_server():
-    """Sets up the aiohttp application and returns the runner."""
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    return web.AppRunner(app)
-
 # --- MAIN EXECUTION ---
-
 async def main():
-    """Starts the bot and the HTTP server, and handles graceful shutdown."""
-    logger.info(f"Bot is starting with domain: {get_domain()}")
-    
-    # --- BOT SETUP ---
-    app = Application.builder().token(BOT_TOKEN).build()
+    """Configures and runs the bot and web server."""
 
-    direct_link_regex = re.compile(r'https?://[a-zA-Z0-9.-]+\/\?id=[\w/+=.-]+')
-
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("setdomain", set_domain_command))
-    app.add_handler(MessageHandler(filters.Regex(direct_link_regex), handle_direct_link))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
-    app.add_handler(CallbackQueryHandler(movie_selection_handler, pattern="^movie:.*"))
-    app.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
-    app.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
-    
-    # --- HTTP SERVER SETUP ---
+    # 1. Set up the web server runner
     http_runner = setup_http_server()
     await http_runner.setup()
     site = web.TCPSite(http_runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info(f"HTTP server started on port {PORT}")
+    logger.info(f"HTTP health check server started on port {PORT}")
 
-    # --- RUN BOT AND SERVER ---
+    # 2. Set up the Telegram bot
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    direct_link_regex = re.compile(r'https?://[a-zA-Z0-9.-]+\/\?id=[\w/+=.-]+')
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("setdomain", set_domain_command))
+    application.add_handler(MessageHandler(filters.Regex(direct_link_regex), handle_direct_link))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
+    application.add_handler(CallbackQueryHandler(movie_selection_handler, pattern="^movie:.*"))
+    application.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
+    application.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
+
+    # 3. Run the bot and web server together, with graceful shutdown
     try:
-        # run_polling is a blocking call that will run until the bot is stopped.
-        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Bot is starting to poll...")
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutdown initiated by user.")
     finally:
-        # When the bot is stopped (e.g., by Ctrl+C), clean up the HTTP server.
+        logger.info("Cleaning up HTTP server...")
         await http_runner.cleanup()
-        logger.info("HTTP server cleaned up.")
-
+        logger.info("Application finished.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped manually.")
+    except Exception as e:
+        logger.error(f"Fatal error in top-level execution: {e}")
