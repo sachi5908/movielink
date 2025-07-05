@@ -225,6 +225,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text('Please select an item:', reply_markup=reply_markup)
 
 async def movie_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles content selection and displays available quality buttons."""
     query = update.callback_query
     await query.answer()
     _p, search_key, index_str = query.data.split(':', 2)
@@ -250,7 +251,17 @@ async def movie_selection_handler(update: Update, context: ContextTypes.DEFAULT_
     RESULTS_CACHE[links_key] = download_links_data
     keyboard = []
     for i, quality_group in enumerate(download_links_data):
-        button_text = quality_group['quality']
+        full_title = quality_group['quality']
+        season_match = re.search(r'(Season\s*\d+)', full_title, re.IGNORECASE)
+        season_text = season_match.group(1).strip() if season_match else ""
+        quality_match = re.search(r'(\d+p\s*\[.*?\])', full_title)
+        quality_text = quality_match.group(1).strip() if quality_match else ""
+        if season_text and quality_text:
+            button_text = f"{season_text} - {quality_text}"
+        elif quality_text:
+            button_text = quality_text
+        else:
+            button_text = full_title
         callback_data = f"quality:{links_key}:{i}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
     
@@ -260,6 +271,7 @@ async def movie_selection_handler(update: Update, context: ContextTypes.DEFAULT_
                                   parse_mode=ParseMode.MARKDOWN)
     if search_key in RESULTS_CACHE:
         del RESULTS_CACHE[search_key]
+
 
 async def quality_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
