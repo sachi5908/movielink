@@ -1,6 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 import json
@@ -28,11 +28,24 @@ if not BOT_TOKEN:
     logger.error("FATAL: BOT_TOKEN environment variable is not set!")
     exit(1)
 
+LOG_BOT_TOKEN = os.environ.get("LOG_BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.error("FATAL: LOG_BOT_TOKEN environment variable is not set!")
+    exit(1)
+
+FORCE_JOIN_CHANNEL = os.environ.get("FORCE_JOIN_CHANNEL")
+if not FORCE_JOIN_CHANNEL:
+    logger.error("FATAL: FORCE_JOIN_CHANNEL environment variable is not set!")
+    exit(1) 
+
 LOG_GROUP_CHAT_ID_STR = os.environ.get("LOG_GROUP_CHAT_ID")
 LOG_GROUP_CHAT_ID = None
 if LOG_GROUP_CHAT_ID_STR:
     try:
         LOG_GROUP_CHAT_ID = int(LOG_GROUP_CHAT_ID_STR)
+        if not LOG_BOT_TOKEN:
+            logger.error("FATAL: LOG_GROUP_CHAT_ID is set, but LOG_BOT_TOKEN is not!")
+            exit(1)
     except ValueError:
         logger.error("FATAL: LOG_GROUP_CHAT_ID environment variable is not a valid integer!")
         exit(1)
@@ -362,23 +375,51 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_identifier = f"@{user.username}" if user.username else user.full_name
 
-    if LOG_GROUP_CHAT_ID:
-        try:
-            log_message = (
-                f"👤 <b>New Search Alert</b> 🎬\n\n"
-                f"<b>User:</b> {user_identifier}\n"
-                f"<b>ID:</b> <code>{user.id}</code>\n"
-                f"<b>Query:</b> {title}"
-            )
-            await context.bot.send_message(
-                chat_id=LOG_GROUP_CHAT_ID,
-                text=log_message,
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.warning(f"Could not send search notification to group {LOG_GROUP_CHAT_ID}: {e}")
-    
-    msg = await update.message.reply_text(f"Searching for '{title}'...")
+    # Send an initial "verifying" message that will be edited later
+    msg = await update.message.reply_text("Searching... ⏳")
+
+    # --- START: MEMBERSHIP CHECK & LOGGING ---
+    if LOG_BOT_TOKEN:
+        log_bot = Bot(token=LOG_BOT_TOKEN)
+
+        # 1. Force Join Check
+        if FORCE_JOIN_CHANNEL:
+            try:
+                member = await log_bot.get_chat_member(chat_id=FORCE_JOIN_CHANNEL, user_id=user.id)
+                if member.status not in ['member', 'administrator', 'creator']:
+                    logger.info(f"User {user.id} ({user_identifier}) is not a member of {FORCE_JOIN_CHANNEL}. Blocking search.")
+                    keyboard = [[InlineKeyboardButton("Join Channel & Retry", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await msg.edit_text(
+                        "You must join our channel to use this bot.",
+                        reply_markup=reply_markup
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"Could not verify membership for user {user.id} in {FORCE_JOIN_CHANNEL}: {e}. Ensure the LOG_BOT is an admin in the channel.")
+                await msg.edit_text("Sorry, there was a system error trying to verify your membership. The bot admin has been notified.")
+                return
+
+        # 2. Log the search query
+        if LOG_GROUP_CHAT_ID:
+            try:
+                log_message = (
+                    f"👤 <b>New Search Alert</b> 🎬\n\n"
+                    f"<b>User:</b> {user_identifier}\n"
+                    f"<b>ID:</b> <code>{user.id}</code>\n"
+                    f"<b>Query:</b> {title}"
+                )
+                await log_bot.send_message(
+                    chat_id=LOG_GROUP_CHAT_ID,
+                    text=log_message,
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.warning(f"Could not send search notification to group {LOG_GROUP_CHAT_ID}: {e}")
+    # --- END: MEMBERSHIP CHECK & LOGGING ---
+
+    # Edit the message to "Searching..." now that verification is complete
+    await msg.edit_text(f"Searching for '{title}'...")
     search_results = search_bollyflix(title)
     if search_results == "domain_error":
         domain = get_domain()
