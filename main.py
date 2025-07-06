@@ -349,6 +349,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a movie/series name.")
 
 async def set_domain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    AUTHORIZED_USER = os.environ.get("AUTHORIZED_USER")
+    user = update.effective_user
+
+    if user.username != AUTHORIZED_USER:
+        await update.message.reply_text(f"❌ Sorry, you can't use this command.")
+        return
+
     try:
         new_domain = context.args[0]
         if not (new_domain.startswith("http://") or new_domain.startswith("https://")):
