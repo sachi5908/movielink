@@ -54,7 +54,7 @@ else:
 
 PORT = int(os.environ.get("PORT", 8080))
 DOMAIN_FILE = "domain.txt"
-DEFAULT_DOMAIN = "https://ndjsbda.com"
+DEFAULT_DOMAIN = "https://bollyflix.dance"
 
 # --- CACHE ---
 RESULTS_CACHE = {}
