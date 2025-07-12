@@ -54,7 +54,10 @@ else:
 
 PORT = int(os.environ.get("PORT", 8080))
 DOMAIN_FILE = "domain.txt"
-DEFAULT_DOMAIN = "https://bollyflix.dance"
+DEFAULT_DOMAIN =  os.environ.get("DEFAULT_DOMAIN")
+if not DEFAULT_DOMAIN:
+    logger.error("FATAL: DEFAULT_DOMAIN environment variable is not set!")
+    exit(1)
 
 # --- CACHE ---
 RESULTS_CACHE = {}
