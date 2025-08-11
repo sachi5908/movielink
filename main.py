@@ -7,6 +7,7 @@ import json
 import base64
 import time
 from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright # Added for the synchronous function
 import asyncio
 import re
 import os
@@ -347,28 +348,31 @@ async def resolve_drivebot_link(start_url: str) -> str or None:
                 break
     return final_download_link
 
-# --- ENVATO BYPASS FUNCTION ---
-async def instant_envato_bypass(envato_direct_url: str):
-    """Bypasses the custom funnel for Envato links using Playwright."""
+# --- ENVATO BYPASS FUNCTION (Synchronous version) ---
+def instant_envato_bypass(envato_direct_url: str):
+    """Bypasses the custom funnel for Envato links using synchronous Playwright."""
     initial_url = "https://envato.isyyy.com/go?url=" + envato_direct_url
     funnel_entry_url = "https://applelatest.com/"
-    logger.info(f"Starting Envato bypass for {envato_direct_url}")
-    browser = None
+    logger.info(f"Starting SYNC Envato bypass for {envato_direct_url}")
+
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
-            page = await browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                                      "Chrome/91.0.4472.124 Safari/537.36")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+            page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                               "Chrome/91.0.4472.124 Safari/537.36")
 
-            logger.info(f"[*] Envato Stage 0: Opening {initial_url}")
-            await page.goto(initial_url, wait_until="domcontentloaded")
+            # Stage 0
+            logger.info(f"[*] SYNC Envato Stage 0: Opening {initial_url}")
+            page.goto(initial_url, wait_until="domcontentloaded", timeout=20000)
 
-            logger.info(f"[*] Envato Stage 1: Opening {funnel_entry_url}")
-            await page.goto(funnel_entry_url, wait_until="domcontentloaded")
+            # Stage 1
+            logger.info(f"[*] SYNC Envato Stage 1: Opening {funnel_entry_url}")
+            page.goto(funnel_entry_url, wait_until="domcontentloaded", timeout=20000)
 
-            logger.info("[*] Envato Stage 2: Evaluating and clicking skip button.")
-            await page.evaluate("""
+            # Stage 2: Skip timer instantly
+            logger.info("[*] SYNC Envato Stage 2: Evaluating and clicking skip button.")
+            page.evaluate("""
                 var btn = document.getElementById('tp98');
                 var link = document.getElementById('link');
                 if (link) link.style.display = 'none';
@@ -376,22 +380,23 @@ async def instant_envato_bypass(envato_direct_url: str):
                 var t = document.getElementById('tp-time');
                 if (t) t.innerHTML = '0';
             """)
-            await page.click("#tp98")
+            page.click("#tp98", timeout=20000)
+            logger.info("[+] Clicked Stage 2 instantly.")
 
-            logger.info("[*] Envato Stage 3: Clicking final button.")
-            await page.wait_for_selector("#btn6", timeout=10000)
-            await page.click("#btn6")
-
-            await page.wait_for_load_state("networkidle")
+            # Stage 3
+            logger.info("[*] SYNC Envato Stage 3: Clicking final button.")
+            page.wait_for_selector("#btn6", timeout=20000)
+            page.click("#btn6")
+            logger.info("[+] Clicked final button.")
             
+            page.wait_for_load_state("networkidle", timeout=20000)
+
             final_url = page.url
-            logger.info(f"[FINAL ENVATO URL] {final_url}")
-            await browser.close()
+            logger.info(f"[FINAL SYNC ENVATO URL] {final_url}")
+            browser.close()
             return final_url
     except Exception as e:
-        logger.error(f"An error occurred during Envato bypass: {e}")
-        if browser and browser.is_connected():
-            await browser.close()
+        logger.error(f"An error occurred during SYNC Envato bypass: {e}")
         return None
 
 # --- TELEGRAM HANDLERS ---
@@ -448,7 +453,8 @@ async def handle_envato_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             logger.error(f"Could not verify membership for Envato link user {user.id}: {e}.")
 
-    final_url = await instant_envato_bypass(url)
+    # Run the synchronous, blocking Playwright function in a separate thread
+    final_url = await asyncio.to_thread(instant_envato_bypass, url)
 
     if final_url and "elements.envato.com" not in final_url:
         keyboard = [[InlineKeyboardButton("✅ Open Bypassed Link", url=final_url)]]
