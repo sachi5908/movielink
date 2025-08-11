@@ -36,7 +36,7 @@ if not BOT_TOKEN:
 FORCE_JOIN_CHANNEL = os.environ.get("FORCE_JOIN_CHANNEL")
 if not FORCE_JOIN_CHANNEL:
     logger.error("FATAL: FORCE_JOIN_CHANNEL environment variable is not set!")
-    exit(1) 
+    exit(1)
 
 LOG_GROUP_CHAT_ID_STR = os.environ.get("LOG_GROUP_CHAT_ID")
 LOG_GROUP_CHAT_ID = None
@@ -86,7 +86,8 @@ def save_domain(new_domain: str):
     with open(DOMAIN_FILE, "w") as f:
         f.write(new_domain)
 
-# --- SCRAPING FUNCTIONS ---
+# --- SCRAPING & RESOLVER FUNCTIONS ---
+
 def search_bollyflix(movie_title: str):
     """Searches for content, retrying once on failure."""
     for attempt in range(2):
@@ -114,11 +115,8 @@ def get_page_details(page_url: str):
     """
     for attempt in range(2):
         try:
-            # This is the potentially long-running process
             response = requests.get(page_url, timeout=15)
             response.raise_for_status()
-
-            # --- Start of processing ---
             soup = BeautifulSoup(response.text, 'html.parser')
 
             poster_tag = soup.find('meta', property='og:image')
@@ -160,7 +158,6 @@ def get_page_details(page_url: str):
                             links_data = [{'text': button_text, 'url': download_button['href']}]
                             final_links.append({'quality': quality_title, 'links': links_data})
 
-            # --- End of processing ---
             return {
                 'poster': poster_url,
                 'screenshots': screenshot_urls,
@@ -248,6 +245,63 @@ def scrape_fxlinks_page(url: str):
                 time.sleep(1)
                 continue
     return "An error occurred while fetching the URL."
+
+def get_final_redirected_url(url: str):
+    """Follows redirects from a URL and returns the final destination."""
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        return response.url  # .url contains the final URL after all redirects
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error getting final redirected URL for {url}: {e}")
+    return None
+
+async def resolve_gdflix_link(url: str) -> list or None:
+    """
+    (UPDATED)
+    Uses Playwright to render a GDFlix page and extract ALL final download links.
+    Returns a list of dictionaries: [{'text': 'Button Text', 'url': '...'}, ...]
+    """
+    logger.info(f"Attempting to resolve all links from GDFlix page: {url}")
+    browser = None
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+
+            # Wait for at least one button to be present to ensure page has loaded
+            await page.wait_for_selector("a.btn", timeout=15000)
+
+            extracted_links = []
+            all_buttons = await page.query_selector_all("a.btn")
+
+            for button in all_buttons:
+                href = await button.get_attribute("href")
+                # Use inner_text() to get the visible text, then clean it
+                text = (await button.inner_text()).strip().replace('\n', ' ')
+                
+                # Filter out login buttons and ensure href and text exist
+                if href and text and "/login" not in href:
+                    final_link = urljoin(url, href)
+                    extracted_links.append({'text': text, 'url': final_link})
+
+            if extracted_links:
+                logger.info(f"Successfully extracted {len(extracted_links)} links from GDFlix.")
+                return extracted_links
+            else:
+                logger.warning("No valid download links found on the GDFlix page.")
+                return None
+            
+    except Exception as e:
+        logger.error(f"Error resolving GDFlix links from {url}: {e}")
+        return None
+    finally:
+        if browser and browser.is_connected():
+            await browser.close()
 
 def scrape_fastdl_links(url: str):
     """Scrapes fastdlserver page, retrying once on failure."""
@@ -398,7 +452,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 member = await log_bot.get_chat_member(chat_id=FORCE_JOIN_CHANNEL, user_id=user.id)
                 if member.status not in ['member', 'administrator', 'creator']:
                     logger.info(f"User {user.id} ({user_identifier}) is not a member of {FORCE_JOIN_CHANNEL}. Blocking search.")
-                    keyboard = [[InlineKeyboardButton("Join Channel & Retry", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
+                    keyboard = [[InlineKeyboardButton("Join Channel & Retry", url=f"https.t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await msg.edit_text(
                         "You must join our channel to use this bot.",
@@ -428,7 +482,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"Could not send search notification to group {LOG_GROUP_CHAT_ID}: {e}")
     # --- END: MEMBERSHIP CHECK & LOGGING ---
 
-    # Edit the message to "Searching..." now that verification is complete
     await msg.edit_text(f"Searching for '{title}'...")
     search_results = search_bollyflix(title)
     if search_results == "domain_error":
@@ -596,7 +649,39 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text("❌ Sorry, I could not extract the final download link.")
             return
 
-        if "fxlinks" in final_url:
+        if "fastdlserver" in final_url:
+            await query.edit_message_text("Found fastdlserver link, checking for GDFlix redirect... 🕵️‍♂️")
+            redirected_url = await asyncio.to_thread(get_final_redirected_url, final_url)
+            
+            if redirected_url and "gdflix.me" in redirected_url:
+                await query.edit_message_text("Redirected to GDFlix. Rendering page to find links... ⏳")
+                gdflix_links = await resolve_gdflix_link(redirected_url)
+                
+                if gdflix_links:
+                    keyboard = []
+                    for link_info in gdflix_links:
+                        keyboard.append([InlineKeyboardButton(f"🔗 {link_info['text']}", url=link_info['url'])])
+                    
+                    keyboard.append([InlineKeyboardButton("📄 Open Page Manually", url=redirected_url)])
+                    
+                    back_to_source_callback = f"quality:{links_key}:{quality_index_str}"
+                    keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_source_callback)])
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.edit_message_text("✅ Found GDFlix Links! Select one:", reply_markup=reply_markup)
+                    return
+                else:
+                    await query.edit_message_text("❌ Failed to resolve GDFlix link. Falling back to scraping...")
+            
+            await query.edit_message_text("Scraping fastdlserver page for direct links... 🕵️‍♂️")
+            scraped_data = await asyncio.to_thread(scrape_fastdl_links, final_url)
+            if isinstance(scraped_data, list) and scraped_data:
+                RESULTS_CACHE[callback_data_key] = scraped_data
+            else:
+                 await query.edit_message_text("❌ Could not scrape any direct links from the fastdlserver page.")
+                 return
+
+        elif "fxlinks" in final_url:
             await query.edit_message_text("Found an Episode page, scraping for episode links... 🕵️‍♂️")
             scraped_data = await asyncio.to_thread(scrape_fxlinks_page, final_url)
             if isinstance(scraped_data, list) and scraped_data:
@@ -614,12 +699,6 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 error_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Open episode Page Manually", url=final_url)]])
                 await query.edit_message_text("❌ Could not scrape any episode links.", reply_markup=error_markup)
             return
-
-        elif "fastdlserver" in final_url:
-            await query.edit_message_text("Found a download link page, scraping for direct links... 🕵️‍♂️")
-            scraped_data = await asyncio.to_thread(scrape_fastdl_links, final_url)
-            if isinstance(scraped_data, list) and scraped_data:
-                RESULTS_CACHE[callback_data_key] = scraped_data
         
         else:
             keyboard = [[InlineKeyboardButton("✅ Open Download Link in Browser", url=final_url)]]
@@ -672,7 +751,27 @@ async def process_fx_link_handler(update: Update, context: ContextTypes.DEFAULT_
 
         selected_link_info = links_list[link_index]
         final_url = selected_link_info['url']
-        await query.edit_message_text(f"Processing '{selected_link_info['text']}'...\nScraping for direct links... 🕵️‍♂️")
+        await query.edit_message_text(f"Processing '{selected_link_info['text']}'...\nChecking for GDFlix redirect... 🕵️‍♂️")
+        
+        redirected_url = await asyncio.to_thread(get_final_redirected_url, final_url)
+        if redirected_url and "gdflix.me" in redirected_url:
+            await query.edit_message_text("Redirected to GDFlix. Rendering page to find links... ⏳")
+            gdflix_links = await resolve_gdflix_link(redirected_url)
+            if gdflix_links:
+                keyboard = []
+                for link_info in gdflix_links:
+                    keyboard.append([InlineKeyboardButton(f"🔗 {link_info['text']}", url=link_info['url'])])
+                
+                keyboard.append([InlineKeyboardButton("📄 Open Page Manually", url=redirected_url)])
+                keyboard.append([InlineKeyboardButton("« Back to Episode List", callback_data=f"back_episodes:{fxlinks_key}")])
+
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text("✅ Found GDFlix Episode Links! Select one:", reply_markup=reply_markup)
+                return
+            else:
+                await query.edit_message_text("❌ Failed to resolve GDFlix link. Falling back to scraping...")
+
+        await query.edit_message_text(f"Scraping for direct links... 🕵️‍♂️")
         scraped_data = await asyncio.to_thread(scrape_fastdl_links, final_url)
         if isinstance(scraped_data, list) and scraped_data:
             RESULTS_CACHE[callback_data_key] = scraped_data
@@ -760,7 +859,7 @@ async def back_to_episodes_handler(update: Update, context: ContextTypes.DEFAULT
     for i, link_info in enumerate(episodes_list):
         callback_data = f"process_fx:{fxlinks_key}:{i}"
         keyboard.append([InlineKeyboardButton(link_info['text'], callback_data=callback_data)])
-
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("✅ Please select an episode to proceed:", reply_markup=reply_markup)
 
