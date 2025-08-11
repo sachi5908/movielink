@@ -29,7 +29,7 @@ if not BOT_TOKEN:
     exit(1)
 
 LOG_BOT_TOKEN = os.environ.get("LOG_BOT_TOKEN")
-if not BOT_TOKEN:
+if not LOG_BOT_TOKEN:
     logger.error("FATAL: LOG_BOT_TOKEN environment variable is not set!")
     exit(1)
 
@@ -347,6 +347,53 @@ async def resolve_drivebot_link(start_url: str) -> str or None:
                 break
     return final_download_link
 
+# --- ENVATO BYPASS FUNCTION ---
+async def instant_envato_bypass(envato_direct_url: str):
+    """Bypasses the custom funnel for Envato links using Playwright."""
+    initial_url = "https://envato.isyyy.com/go?url=" + envato_direct_url
+    funnel_entry_url = "https://applelatest.com/"
+    logger.info(f"Starting Envato bypass for {envato_direct_url}")
+    browser = None
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
+            page = await browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                                      "Chrome/91.0.4472.124 Safari/537.36")
+
+            logger.info(f"[*] Envato Stage 0: Opening {initial_url}")
+            await page.goto(initial_url, wait_until="domcontentloaded")
+
+            logger.info(f"[*] Envato Stage 1: Opening {funnel_entry_url}")
+            await page.goto(funnel_entry_url, wait_until="domcontentloaded")
+
+            logger.info("[*] Envato Stage 2: Evaluating and clicking skip button.")
+            await page.evaluate("""
+                var btn = document.getElementById('tp98');
+                var link = document.getElementById('link');
+                if (link) link.style.display = 'none';
+                if (btn) { btn.style.display = 'block'; btn.disabled = false; btn.style.opacity = '1'; }
+                var t = document.getElementById('tp-time');
+                if (t) t.innerHTML = '0';
+            """)
+            await page.click("#tp98")
+
+            logger.info("[*] Envato Stage 3: Clicking final button.")
+            await page.wait_for_selector("#btn6", timeout=10000)
+            await page.click("#btn6")
+
+            await page.wait_for_load_state("networkidle")
+            
+            final_url = page.url
+            logger.info(f"[FINAL ENVATO URL] {final_url}")
+            await browser.close()
+            return final_url
+    except Exception as e:
+        logger.error(f"An error occurred during Envato bypass: {e}")
+        if browser and browser.is_connected():
+            await browser.close()
+        return None
+
 # --- TELEGRAM HANDLERS ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a movie/series name.")
@@ -379,6 +426,58 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.edit_text("Your direct download link is ready!", reply_markup=reply_markup)
     else:
         await msg.edit_text("❌ Sorry, I could not extract the final download link from the provided URL.")
+
+async def handle_envato_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles Envato Elements links by bypassing the protection."""
+    url = update.message.text
+    user = update.effective_user
+    user_identifier = f"@{user.username}" if user.username else user.full_name
+    logger.info(f"User {user_identifier} sent an Envato link: {url}")
+    msg = await update.message.reply_text("Processing Envato link... This may take a moment. 🛠️")
+
+    if LOG_BOT_TOKEN and FORCE_JOIN_CHANNEL:
+        log_bot = Bot(token=LOG_BOT_TOKEN)
+        try:
+            member = await log_bot.get_chat_member(chat_id=FORCE_JOIN_CHANNEL, user_id=user.id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                logger.info(f"User {user.id} ({user_identifier}) is not a member of {FORCE_JOIN_CHANNEL}. Blocking Envato link.")
+                keyboard = [[InlineKeyboardButton("Join Channel & Retry", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await msg.edit_text("You must join our channel to use this bot.", reply_markup=reply_markup)
+                return
+        except Exception as e:
+            logger.error(f"Could not verify membership for Envato link user {user.id}: {e}.")
+
+    final_url = await instant_envato_bypass(url)
+
+    if final_url and "elements.envato.com" not in final_url:
+        keyboard = [[InlineKeyboardButton("✅ Open Bypassed Link", url=final_url)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await msg.edit_text("✅ Your Envato link has been processed!", reply_markup=reply_markup)
+        if LOG_BOT_TOKEN and LOG_GROUP_CHAT_ID:
+            try:
+                log_bot = Bot(token=LOG_BOT_TOKEN)
+                log_message = (f"✅ <b>Envato Link Success</b>\n\n"
+                               f"<b>User:</b> {user_identifier}\n"
+                               f"<b>ID:</b> <code>{user.id}</code>\n"
+                               f"<b>Original:</b> <code>{url}</code>\n"
+                               f"<b>Final:</b> <code>{final_url}</code>")
+                await log_bot.send_message(chat_id=LOG_GROUP_CHAT_ID, text=log_message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            except Exception as e:
+                 logger.warning(f"Could not send Envato success notification to group {LOG_GROUP_CHAT_ID}: {e}")
+    else:
+        await msg.edit_text("❌ Sorry, I could not process the Envato link. The bypass may have failed.")
+        if LOG_BOT_TOKEN and LOG_GROUP_CHAT_ID:
+            try:
+                log_bot = Bot(token=LOG_BOT_TOKEN)
+                log_message = (f"❌ <b>Envato Link Failure</b>\n\n"
+                               f"<b>User:</b> {user_identifier}\n"
+                               f"<b>ID:</b> <code>{user.id}</code>\n"
+                               f"<b>URL:</b> <code>{url}</code>")
+                await log_bot.send_message(chat_id=LOG_GROUP_CHAT_ID, text=log_message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            except Exception as e:
+                 logger.warning(f"Could not send Envato failure notification to group {LOG_GROUP_CHAT_ID}: {e}")
+
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = update.message.text
@@ -802,6 +901,7 @@ async def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setdomain", set_domain_command))
     application.add_handler(MessageHandler(filters.Regex(r'https?://[a-zA-Z0-9.-]+\/\?id=[\w/+=.-]+'), handle_direct_link))
+    application.add_handler(MessageHandler(filters.Regex(r'https?://elements\.envato\.com'), handle_envato_link))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
     application.add_handler(CallbackQueryHandler(movie_selection_handler, pattern="^movie:.*"))
     application.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
