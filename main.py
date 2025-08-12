@@ -13,6 +13,7 @@ import os
 import logging
 from aiohttp import web
 from urllib.parse import urlparse, parse_qs, urljoin
+from datetime import datetime, timedelta
 
 # --- SETUP 1: LOGGING ---
 logging.basicConfig(
@@ -413,9 +414,10 @@ async def resolve_drivebot_link(start_url: str) -> str or None:
     return final_download_link
 
 # --- ENVATO RESOLVER FUNCTION ---
-async def resolve_envato_link(envato_direct_url: str) -> str or None:
+async def resolve_envato_link(envato_direct_url: str) -> dict or str or None:
     """
     Asynchronously bypasses the Envato link protection funnel.
+    Returns a URL string on success, a dict on limit error, or None on failure.
     """
     initial_url = f"https://envato.isyyy.com/go?url={envato_direct_url}"
     funnel_entry_url = "https://applelatest.com/en/"
@@ -428,7 +430,7 @@ async def resolve_envato_link(envato_direct_url: str) -> str or None:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled"]
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
             )
             context = await browser.new_context(
                 ignore_https_errors=True,
@@ -437,6 +439,22 @@ async def resolve_envato_link(envato_direct_url: str) -> str or None:
             page = await context.new_page()
 
             await async_retry_step(lambda: page.goto(initial_url, timeout=15000), desc="Goto initial URL")
+            
+            # --- NEW: Check for download limit message ---
+            page_content = await page.content()
+            if "download limit" in page_content.lower():
+                logger.warning("Envato download limit reached.")
+                match = re.search(r"come back in\s+(\d+)\s+hours?\s+and\s+(\d+)\s+minutes?", page_content, re.IGNORECASE)
+                limit_message = "Download limit reached. Please try again later."
+                if match:
+                    hours = int(match.group(1))
+                    minutes = int(match.group(2))
+                    retry_time = datetime.now() + timedelta(hours=hours, minutes=minutes)
+                    limit_message = f"Download limit reached. Please try again in {hours}h {minutes}m (around {retry_time.strftime('%I:%M %p')})."
+                
+                await browser.close()
+                return {'status': 'limit_reached', 'message': limit_message}
+            # --- END NEW ---
 
             if "privacy-error" in page.url or "cert-error" in page.url:
                 logger.info("Privacy error page detected, attempting to proceed.")
@@ -458,7 +476,6 @@ async def resolve_envato_link(envato_direct_url: str) -> str or None:
             await async_retry_step(lambda: page.wait_for_selector("#btn6", timeout=10000), desc="Wait for final button")
             await async_retry_step(lambda: page.click("#btn6"), desc="Click final button")
 
-            # Wait for navigation to complete after the final click
             await page.wait_for_load_state('networkidle', timeout=15000)
 
             final_url = page.url
@@ -511,13 +528,16 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_envato_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     msg = await update.message.reply_text("Processing your Envato link... This can take up to a minute. ⏳")
-    final_url = await resolve_envato_link(url)
-    if final_url:
-        keyboard = [[InlineKeyboardButton("✅ Open Final Envato Link", url=final_url)]]
+    result = await resolve_envato_link(url)
+    
+    if isinstance(result, str):
+        keyboard = [[InlineKeyboardButton("✅ Open Final Envato Link", url=result)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await msg.edit_text("Your Envato link is ready!", reply_markup=reply_markup)
+    elif isinstance(result, dict) and result.get('status') == 'limit_reached':
+        await msg.edit_text(f"❌ {result.get('message')}")
     else:
-        await msg.edit_text("❌ Sorry, I failed to bypass the Envato link. The site structure may have changed.")
+        await msg.edit_text("❌ Sorry, I failed to bypass the Envato link. The site structure may have changed or another error occurred.")
 
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
