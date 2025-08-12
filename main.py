@@ -29,7 +29,7 @@ if not BOT_TOKEN:
     exit(1)
 
 LOG_BOT_TOKEN = os.environ.get("LOG_BOT_TOKEN")
-if not BOT_TOKEN:
+if not LOG_BOT_TOKEN:
     logger.error("FATAL: LOG_BOT_TOKEN environment variable is not set!")
     exit(1)
 
@@ -85,6 +85,18 @@ def get_domain():
 def save_domain(new_domain: str):
     with open(DOMAIN_FILE, "w") as f:
         f.write(new_domain)
+
+async def async_retry_step(async_func, retries=3, delay=2, desc="Step"):
+    """Asynchronous retry wrapper for playwright operations."""
+    for attempt in range(1, retries + 1):
+        try:
+            return await async_func()
+        except Exception as e:
+            logger.warning(f"[!] {desc} failed (Attempt {attempt}/{retries}): {e}")
+            if attempt < retries:
+                await asyncio.sleep(delay)
+            else:
+                raise
 
 # --- SCRAPING & RESOLVER FUNCTIONS ---
 
@@ -329,7 +341,6 @@ def scrape_fastdl_links(url: str):
                 continue
     return "An error occurred while fetching the URL."
 
-
 # --- DRIVEBOTS RESOLVER FUNCTIONS ---
 def get_intermediate_links(start_url: str) -> list:
     """Visits the initial page to extract the two intermediate URLs."""
@@ -401,9 +412,70 @@ async def resolve_drivebot_link(start_url: str) -> str or None:
                 break
     return final_download_link
 
+# --- ENVATO RESOLVER FUNCTION ---
+async def resolve_envato_link(envato_direct_url: str) -> str or None:
+    """
+    Asynchronously bypasses the Envato link protection funnel.
+    """
+    initial_url = f"https://envato.isyyy.com/go?url={envato_direct_url}"
+    funnel_entry_url = "https://applelatest.com/en/"
+    final_url = None
+    browser = None
+    
+    logger.info(f"Starting Envato bypass for: {envato_direct_url}")
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+            context = await browser.new_context(
+                ignore_https_errors=True,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            )
+            page = await context.new_page()
+
+            await async_retry_step(lambda: page.goto(initial_url, timeout=15000), desc="Goto initial URL")
+
+            if "privacy-error" in page.url or "cert-error" in page.url:
+                logger.info("Privacy error page detected, attempting to proceed.")
+                await async_retry_step(lambda: page.click("#proceed-link"), desc="Bypass Chrome security warning")
+
+            await async_retry_step(lambda: page.goto(funnel_entry_url, timeout=15000), desc="Goto funnel entry URL")
+
+            js_script = """
+                var btn = document.getElementById('tp98');
+                var link = document.getElementById('link');
+                if (link) link.style.display = 'none';
+                if (btn) { btn.style.display = 'block'; btn.disabled = false; btn.style.opacity = '1'; }
+                var t = document.getElementById('tp-time');
+                if (t) t.innerHTML = '0';
+            """
+            await async_retry_step(lambda: page.evaluate(js_script), desc="Run skip timer JS")
+            
+            await async_retry_step(lambda: page.click("#tp98"), desc="Click Stage 2 button")
+            await async_retry_step(lambda: page.wait_for_selector("#btn6", timeout=10000), desc="Wait for final button")
+            await async_retry_step(lambda: page.click("#btn6"), desc="Click final button")
+
+            # Wait for navigation to complete after the final click
+            await page.wait_for_load_state('networkidle', timeout=15000)
+
+            final_url = page.url
+            logger.info(f"Successfully bypassed Envato, final URL: {final_url}")
+            
+    except Exception as e:
+        logger.error(f"A critical error occurred during Envato bypass: {e}")
+        return None
+    finally:
+        if browser and browser.is_connected():
+            await browser.close()
+            
+    return final_url
+
 # --- TELEGRAM HANDLERS ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send me a movie/series name.")
+    await update.message.reply_text("Send me a movie/series name, or a supported direct link.")
 
 async def set_domain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AUTHORIZED_USER = os.environ.get("AUTHORIZED_USER")
@@ -432,7 +504,21 @@ async def handle_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup = InlineKeyboardMarkup(keyboard)
         await msg.edit_text("Your direct download link is ready!", reply_markup=reply_markup)
     else:
-        await msg.edit_text("❌ Sorry, I could not extract the final download link from the provided URL.")
+        keyboard = [[InlineKeyboardButton("📄 Open Original Link Manually", url=url)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await msg.edit_text("❌ Sorry, I could not extract the final link. You can try opening it manually.", reply_markup=reply_markup)
+
+async def handle_envato_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text
+    msg = await update.message.reply_text("Processing your Envato link... This can take up to a minute. ⏳")
+    final_url = await resolve_envato_link(url)
+    if final_url:
+        keyboard = [[InlineKeyboardButton("✅ Open Final Envato Link", url=final_url)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await msg.edit_text("Your Envato link is ready!", reply_markup=reply_markup)
+    else:
+        await msg.edit_text("❌ Sorry, I failed to bypass the Envato link. The site structure may have changed.")
+
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = update.message.text
@@ -452,7 +538,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 member = await log_bot.get_chat_member(chat_id=FORCE_JOIN_CHANNEL, user_id=user.id)
                 if member.status not in ['member', 'administrator', 'creator']:
                     logger.info(f"User {user.id} ({user_identifier}) is not a member of {FORCE_JOIN_CHANNEL}. Blocking search.")
-                    keyboard = [[InlineKeyboardButton("Join Channel & Retry", url=f"https.t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
+                    keyboard = [[InlineKeyboardButton("Join Channel & Retry", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await msg.edit_text(
                         "You must join our channel to use this bot.",
@@ -646,7 +732,15 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         final_url = await extract_final_link(link_url)
 
         if not final_url:
-            await query.edit_message_text("❌ Sorry, I could not extract the final download link.")
+            logger.warning(f"extract_final_link failed for {link_url}. Providing manual link.")
+            keyboard = [[InlineKeyboardButton("📄 Open Page Manually", url=link_url)]]
+            back_to_source_callback = f"quality:{links_key}:{quality_index_str}"
+            keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_source_callback)])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "❌ Failed to resolve the link automatically. You can try opening the original link manually.",
+                reply_markup=reply_markup
+            )
             return
 
         if "fastdlserver" in final_url:
@@ -678,8 +772,16 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             if isinstance(scraped_data, list) and scraped_data:
                 RESULTS_CACHE[callback_data_key] = scraped_data
             else:
-                 await query.edit_message_text("❌ Could not scrape any direct links from the fastdlserver page.")
-                 return
+                logger.warning(f"Failed to scrape fastdlserver page. Providing manual link: {final_url}")
+                keyboard = [[InlineKeyboardButton("📄 Open Page Manually", url=final_url)]]
+                back_to_sources_callback = f"quality:{links_key}:{quality_index_str}"
+                keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_sources_callback)])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(
+                    "❌ Could not automatically find links on this page. You can try opening it manually.",
+                    reply_markup=reply_markup
+                )
+                return
 
         elif "fxlinks" in final_url:
             await query.edit_message_text("Found an Episode page, scraping for episode links... 🕵️‍♂️")
@@ -696,7 +798,11 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.edit_message_text("✅ Found episode links! Please select one to proceed:", reply_markup=reply_markup)
             else:
-                error_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Open episode Page Manually", url=final_url)]])
+                back_to_source_callback = f"quality:{links_key}:{quality_index}"
+                error_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📄 Open Episode Page Manually", url=final_url)],
+                    [InlineKeyboardButton("« Back to Sources", callback_data=back_to_source_callback)]
+                ])
                 await query.edit_message_text("❌ Could not scrape any episode links.", reply_markup=error_markup)
             return
         
@@ -723,13 +829,29 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("✅ Your direct download links are ready!", reply_markup=reply_markup)
     else:
-        await query.edit_message_text("❌ Could not scrape valid links. Try opening the page manually.")
+        logger.warning(f"Scraped data was not a list or was empty. Fallback required. Data: {scraped_data}")
+        keyboard = [
+            [InlineKeyboardButton("« Back", callback_data=f"quality:{links_key}:{quality_index_str}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("❌ Could not scrape valid links. Please go back and try another source.", reply_markup=reply_markup)
 
 
 async def process_fx_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     callback_data_key = query.data
+
+    final_url_from_cache = None
+    try:
+        _p, fxlinks_key, link_index_str = callback_data_key.split(':', 2)
+        links_list = RESULTS_CACHE.get(fxlinks_key)
+        if links_list:
+            link_index = int(link_index_str)
+            if link_index < len(links_list):
+                 final_url_from_cache = links_list[link_index].get('url')
+    except (ValueError, IndexError):
+        pass
 
     cached_links = RESULTS_CACHE.get(callback_data_key)
     if cached_links:
@@ -775,6 +897,18 @@ async def process_fx_link_handler(update: Update, context: ContextTypes.DEFAULT_
         scraped_data = await asyncio.to_thread(scrape_fastdl_links, final_url)
         if isinstance(scraped_data, list) and scraped_data:
             RESULTS_CACHE[callback_data_key] = scraped_data
+        else:
+            logger.warning(f"Failed to scrape from FX link's final URL. Providing manual link: {final_url}")
+            keyboard = [
+                [InlineKeyboardButton("📄 Open Page Manually", url=final_url)],
+                [InlineKeyboardButton("« Back to Episode List", callback_data=f"back_episodes:{fxlinks_key}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "❌ Could not automatically find links on this page. You can try opening it manually.",
+                reply_markup=reply_markup
+            )
+            return
 
     if isinstance(scraped_data, list) and scraped_data:
         keyboard = []
@@ -793,7 +927,7 @@ async def process_fx_link_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"✅ Your direct download links for the selected episode:", reply_markup=reply_markup)
     else:
         keyboard = [
-            [InlineKeyboardButton("Open Page Manually", url=final_url if 'final_url' in locals() else "#")],
+            [InlineKeyboardButton("📄 Open Page Manually", url=final_url_from_cache or "#")],
             [InlineKeyboardButton("« Back to Episode List", callback_data=f"back_episodes:{fxlinks_key}")]
         ]
         error_markup = InlineKeyboardMarkup(keyboard)
@@ -833,7 +967,7 @@ async def drivebot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ Success! Your DriveBot link is resolved:", reply_markup=reply_markup)
     else:
         keyboard = [
-            [InlineKeyboardButton("Manual Fallback Link", url=start_url)],
+            [InlineKeyboardButton("📄 Manual Fallback Link", url=start_url)],
             [InlineKeyboardButton("« Back", callback_data=back_callback)]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -898,10 +1032,16 @@ async def back_to_search_handler(update: Update, context: ContextTypes.DEFAULT_T
 async def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # Command Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setdomain", set_domain_command))
+
+    # Message Handlers - Order is important! Specific link handlers go first.
+    application.add_handler(MessageHandler(filters.Regex(r'https?://elements\.envato\.com/'), handle_envato_link))
     application.add_handler(MessageHandler(filters.Regex(r'https?://[a-zA-Z0-9.-]+\/\?id=[\w/+=.-]+'), handle_direct_link))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
+    
+    # Callback Query Handlers
     application.add_handler(CallbackQueryHandler(movie_selection_handler, pattern="^movie:.*"))
     application.add_handler(CallbackQueryHandler(quality_selection_handler, pattern="^quality:.*"))
     application.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
@@ -910,6 +1050,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(back_to_episodes_handler, pattern="^back_episodes:.*"))
     application.add_handler(CallbackQueryHandler(back_to_search_handler, pattern="^back_search:.*"))
 
+    # Setup and run Bot and Web Server
     http_runner = setup_http_server()
     await http_runner.setup()
     site = web.TCPSite(http_runner, "0.0.0.0", PORT)
