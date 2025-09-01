@@ -34,10 +34,11 @@ if not LOG_BOT_TOKEN:
     logger.error("FATAL: LOG_BOT_TOKEN environment variable is not set!")
     exit(1)
 
-FORCE_JOIN_CHANNEL = os.environ.get("FORCE_JOIN_CHANNEL")
-if not FORCE_JOIN_CHANNEL:
-    logger.error("FATAL: FORCE_JOIN_CHANNEL environment variable is not set!")
-    exit(1)
+# Note: The following lines related to FORCE_JOIN_CHANNEL have been removed.
+# FORCE_JOIN_CHANNEL = os.environ.get("FORCE_JOIN_CHANNEL")
+# if not FORCE_JOIN_CHANNEL:
+#     logger.error("FATAL: FORCE_JOIN_CHANNEL environment variable is not set!")
+#     exit(1)
 
 LOG_GROUP_CHAT_ID_STR = os.environ.get("LOG_GROUP_CHAT_ID")
 LOG_GROUP_CHAT_ID = None
@@ -552,24 +553,8 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if LOG_BOT_TOKEN:
         log_bot = Bot(token=LOG_BOT_TOKEN)
 
-        # 1. Force Join Check
-        if FORCE_JOIN_CHANNEL:
-            try:
-                member = await log_bot.get_chat_member(chat_id=FORCE_JOIN_CHANNEL, user_id=user.id)
-                if member.status not in ['member', 'administrator', 'creator']:
-                    logger.info(f"User {user.id} ({user_identifier}) is not a member of {FORCE_JOIN_CHANNEL}. Blocking search.")
-                    keyboard = [[InlineKeyboardButton("Join Channel & Retry", url=f"https://t.me/{FORCE_JOIN_CHANNEL.lstrip('@')}")]]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await msg.edit_text(
-                        "You must join our channel to use this bot.",
-                        reply_markup=reply_markup
-                    )
-                    return
-            except Exception as e:
-                logger.error(f"Could not verify membership for user {user.id} in {FORCE_JOIN_CHANNEL}: {e}. Ensure the LOG_BOT is an admin in the channel.")
-                await msg.edit_text("Sorry, there was a system error trying to verify your membership. The bot admin has been notified.")
-                return
-
+        # The section for Force Join Check has been removed.
+        
         # 2. Log the search query
         if LOG_GROUP_CHAT_ID:
             try:
