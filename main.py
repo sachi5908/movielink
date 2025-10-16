@@ -220,28 +220,11 @@ async def extract_final_link(url: str):
                 page = await context.new_page()
                 try:
                     await page.goto(url, timeout=15000, wait_until="domcontentloaded")
-                    # Wait for potential JavaScript execution (like the 3s timeout in the example)
-                    await page.wait_for_timeout(5000)
-
-                    # --- Primary check for "Instant DL" page structure ---
-                    try:
-                        # The link is in an anchor tag with id 'vd' which becomes visible after a delay.
-                        instant_dl_link = await page.locator("a#vd").get_attribute("href", timeout=5000)
-                        if instant_dl_link and instant_dl_link != '#':
-                            logger.info(f"Successfully extracted Instant-DL link: {instant_dl_link}")
-                            await browser.close()
-                            return instant_dl_link
-                    except Exception:
-                        logger.info("Instant-DL element 'a#vd' not found, proceeding with fallback check.")
-                    # --- End of primary check ---
-
-                    # Fallback check (original logic)
-                    await page.wait_for_timeout(5000) # Another wait for other potential scripts
+                    await page.wait_for_timeout(10000)
                     found_link = await parse_page_for_link(page)
                     if found_link:
                         await browser.close()
                         return found_link
-
                 except Exception as e:
                     logger.error(f"Page navigation error on attempt {attempt + 1}: {e}")
         except Exception as e:
