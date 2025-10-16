@@ -491,7 +491,7 @@ async def resolve_envato_link(envato_direct_url: str) -> dict or str or None:
             
     return final_url
 
-# --- NEW: INSTANT LINK RESOLVER ---
+# --- INSTANT LINK RESOLVER ---
 async def resolve_instant_link(url: str) -> str | None:
     """
     Uses Playwright to resolve links from pages where the download button
@@ -739,6 +739,7 @@ async def quality_selection_handler(update: Update, context: ContextTypes.DEFAUL
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(f"✅ *Select a download source for {selected_quality_group['quality']}*", reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
+# --- THIS IS THE UPDATED/FIXED FUNCTION ---
 async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -749,15 +750,20 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         scraped_data = cached_links
         _p, links_key, quality_index_str, _l = callback_data_key.split(':', 3)
     else:
-        _p, links_key, quality_index_str, link_index_str = callback_data_key.split(':', 3)
-        quality_index = int(quality_index_str)
-        link_index = int(link_index_str)
+        try:
+            _p, links_key, quality_index_str, link_index_str = callback_data_key.split(':', 3)
+            quality_index = int(quality_index_str)
+            link_index = int(link_index_str)
+        except (ValueError, IndexError):
+            await query.edit_message_text("Error: Invalid link data. Please start over.")
+            return
 
         cached_data = RESULTS_CACHE.get(links_key)
         if not cached_data:
             await query.edit_message_text("Error: This link has expired. Please search again.")
             return
 
+        # Clean up previous screenshot messages
         screenshot_ids_to_delete = cached_data.get('message_ids_screenshots', [])
         for msg_id in screenshot_ids_to_delete:
             try:
@@ -770,6 +776,7 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         link_url = selected_link['url']
         link_text = selected_link['text']
         await query.edit_message_text(f"Processing '{link_text}'... This may take a moment. ⏳")
+        
         final_url = await extract_final_link(link_url)
 
         if not final_url:
@@ -779,91 +786,87 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_source_callback)])
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                "❌ Failed to resolve the link automatically. You can try opening the original link manually.",
+                "❌ Failed to resolve the link automatically. Please try opening it manually.",
                 reply_markup=reply_markup
             )
             return
 
-        if "fastdlserver" in final_url:
-            await query.edit_message_text("Found fastdlserver link, checking for GDFlix redirect... 🕵️‍♂️")
-            redirected_url = await asyncio.to_thread(get_final_redirected_url, final_url)
+        # --- REVISED LOGIC BLOCK STARTS HERE ---
+        if "fastdlserver" in final_url or "fxlinks" in final_url:
+            await query.edit_message_text("Found an intermediate page, checking for episodes... 🕵️‍♂️")
             
-            if redirected_url and "gdflix.me" in redirected_url:
-                await query.edit_message_text("Redirected to GDFlix. Rendering page to find links... ⏳")
-                gdflix_links = await resolve_gdflix_link(redirected_url)
-                
-                if gdflix_links:
-                    keyboard = []
-                    for link_info in gdflix_links:
-                        keyboard.append([InlineKeyboardButton(f"🔗 {link_info['text']}", url=link_info['url'])])
-                    
-                    keyboard.append([InlineKeyboardButton("📄 Open Page Manually", url=redirected_url)])
-                    
-                    back_to_source_callback = f"quality:{links_key}:{quality_index_str}"
-                    keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_source_callback)])
-                    
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await query.edit_message_text("✅ Found GDFlix Links! Select one:", reply_markup=reply_markup)
-                    return
-                else:
-                    await query.edit_message_text("❌ Failed to resolve GDFlix link. Falling back to scraping...")
+            # First, try to treat it as an episode list page
+            episode_links = await asyncio.to_thread(scrape_fxlinks_page, final_url)
             
-            await query.edit_message_text("Scraping fastdlserver page for direct links... 🕵️‍♂️")
-            scraped_data = await asyncio.to_thread(scrape_fastdl_links, final_url)
-            if isinstance(scraped_data, list) and scraped_data:
-                RESULTS_CACHE[callback_data_key] = scraped_data
-            else:
-                logger.warning(f"Failed to scrape fastdlserver page. Providing manual link: {final_url}")
-                keyboard = [[InlineKeyboardButton("📄 Open Page Manually", url=final_url)]]
-                back_to_sources_callback = f"quality:{links_key}:{quality_index_str}"
-                keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_sources_callback)])
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_text(
-                    "❌ Could not automatically find links on this page. You can try opening it manually.",
-                    reply_markup=reply_markup
-                )
-                return
-
-        elif "fxlinks" in final_url:
-            await query.edit_message_text("Found an Episode page, scraping for episode links... 🕵️‍♂️")
-            scraped_data = await asyncio.to_thread(scrape_fxlinks_page, final_url)
-            if isinstance(scraped_data, list) and scraped_data:
+            if isinstance(episode_links, list) and episode_links:
+                # SUCCESS: We found episode links! Display them.
                 fxlinks_key = f"fxlinks_{query.id}"
-                RESULTS_CACHE[fxlinks_key] = scraped_data
+                RESULTS_CACHE[fxlinks_key] = episode_links
                 keyboard = []
-                for i, link_info in enumerate(scraped_data):
+                for i, link_info in enumerate(episode_links):
                     callback_data = f"process_fx:{fxlinks_key}:{i}"
                     keyboard.append([InlineKeyboardButton(link_info['text'], callback_data=callback_data)])
+                
                 back_to_source_callback = f"quality:{links_key}:{quality_index}"
                 keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_source_callback)])
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.edit_message_text("✅ Found episode links! Please select one to proceed:", reply_markup=reply_markup)
+                return # Stop further processing
+
+            # FAILURE: No episodes found, so treat it as a final movie page
             else:
-                back_to_source_callback = f"quality:{links_key}:{quality_index}"
-                error_markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📄 Open Episode Page Manually", url=final_url)],
-                    [InlineKeyboardButton("« Back to Sources", callback_data=back_to_source_callback)]
-                ])
-                await query.edit_message_text("❌ Could not scrape any episode links.", reply_markup=error_markup)
-            return
+                await query.edit_message_text("No episodes found. Checking for GDFlix redirect... 🕵️‍♂️")
+                redirected_url = await asyncio.to_thread(get_final_redirected_url, final_url)
+                
+                if redirected_url and "gdflix.me" in redirected_url:
+                    await query.edit_message_text("Redirected to GDFlix. Rendering page to find links... ⏳")
+                    gdflix_links = await resolve_gdflix_link(redirected_url)
+                    
+                    if gdflix_links:
+                        keyboard = []
+                        for link_info in gdflix_links:
+                            keyboard.append([InlineKeyboardButton(f"🔗 {link_info['text']}", url=link_info['url'])])
+                        keyboard.append([InlineKeyboardButton("📄 Open Page Manually", url=redirected_url)])
+                        back_to_source_callback = f"quality:{links_key}:{quality_index_str}"
+                        keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_source_callback)])
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        await query.edit_message_text("✅ Found GDFlix Links! Select one:", reply_markup=reply_markup)
+                        return
+                
+                # If no GDFlix or episodes, scrape for direct download links
+                await query.edit_message_text("Scraping fastdlserver page for direct links... 🕵️‍♂️")
+                scraped_data = await asyncio.to_thread(scrape_fastdl_links, final_url)
+                if isinstance(scraped_data, list) and scraped_data:
+                    RESULTS_CACHE[callback_data_key] = scraped_data
+                else:
+                    logger.warning(f"Failed to scrape fastdlserver page. Providing manual link: {final_url}")
+                    keyboard = [[InlineKeyboardButton("📄 Open Page Manually", url=final_url)]]
+                    back_to_sources_callback = f"quality:{links_key}:{quality_index_str}"
+                    keyboard.append([InlineKeyboardButton("« Back to Sources", callback_data=back_to_sources_callback)])
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.edit_message_text(
+                        "❌ Could not automatically find links on this page. You can try opening it manually.",
+                        reply_markup=reply_markup
+                    )
+                    return
+        # --- REVISED LOGIC BLOCK ENDS HERE ---
         
-        else:
+        else: # This handles other links that are not fastdlserver or fxlinks
             keyboard = [[InlineKeyboardButton("✅ Open Download Link in Browser", url=final_url)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text("Your direct download link is ready!", reply_markup=reply_markup)
             return
 
+    # This part of the function now only handles the display of the final scraped links
     if isinstance(scraped_data, list) and scraped_data:
         keyboard = []
         for i, link_info in enumerate(scraped_data):
-            # --- NEW LOGIC: Handle 'instant' links ---
             if 'instant' in link_info['url'] or 'instant' in link_info['text'].lower():
                 instant_key = f"inst_{query.id}_{i}"
                 back_callback = callback_data_key
                 RESULTS_CACHE[instant_key] = {'url': link_info['url'], 'back': back_callback}
                 callback_data = f"instant:{instant_key}"
                 keyboard.append([InlineKeyboardButton(f"⚡️ {link_info['text']}", callback_data=callback_data)])
-            # --- End new logic ---
             elif 'drivebots' in link_info['url']:
                 drivebot_key = f"db_{query.id}_{i}"
                 back_callback = callback_data_key
@@ -884,7 +887,6 @@ async def process_link_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("❌ Could not scrape valid links. Please go back and try another source.", reply_markup=reply_markup)
-
 
 async def process_fx_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -962,14 +964,12 @@ async def process_fx_link_handler(update: Update, context: ContextTypes.DEFAULT_
     if isinstance(scraped_data, list) and scraped_data:
         keyboard = []
         for i, link_info in enumerate(scraped_data):
-            # --- NEW LOGIC: Handle 'instant' links ---
             if 'instant' in link_info['url'] or 'instant' in link_info['text'].lower():
                 instant_key = f"inst_{query.id}_{i}"
                 back_callback = callback_data_key
                 RESULTS_CACHE[instant_key] = {'url': link_info['url'], 'back': back_callback}
                 callback_data = f"instant:{instant_key}"
                 keyboard.append([InlineKeyboardButton(f"⚡️ {link_info['text']}", callback_data=callback_data)])
-            # --- End new logic ---
             elif 'drivebots' in link_info['url']:
                 drivebot_key = f"db_{query.id}_{i}"
                 back_callback = callback_data_key
@@ -1030,7 +1030,7 @@ async def drivebot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("❌ Failed to automatically resolve the DriveBot link. You can try opening it manually.", reply_markup=reply_markup)
 
-# --- NEW: INSTANT LINK HANDLER ---
+
 async def instant_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1139,7 +1139,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(process_link_handler, pattern="^process:.*"))
     application.add_handler(CallbackQueryHandler(process_fx_link_handler, pattern="^process_fx:.*"))
     application.add_handler(CallbackQueryHandler(drivebot_handler, pattern="^drivebot:.*"))
-    application.add_handler(CallbackQueryHandler(instant_handler, pattern="^instant:.*")) # <-- ADDED HANDLER
+    application.add_handler(CallbackQueryHandler(instant_handler, pattern="^instant:.*"))
     application.add_handler(CallbackQueryHandler(back_to_episodes_handler, pattern="^back_episodes:.*"))
     application.add_handler(CallbackQueryHandler(back_to_search_handler, pattern="^back_search:.*"))
 
